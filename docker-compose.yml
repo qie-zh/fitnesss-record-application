@@ -1,0 +1,25 @@
+services:
+  fitness-backend:
+    build: ./backend
+    container_name: fitness-backend
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://zhang:zh1998@postgres-rag:5432/fitness
+    networks:
+      - app_net
+
+  fitness-frontend:
+    build: ./frontend
+    container_name: fitness-frontend
+    restart: always
+    ports:
+      - "3002:80"
+    depends_on:
+      - fitness-backend
+    networks:
+      - app_net
+
+networks:
+  app_net:
+    external: true
+    name: app_default
