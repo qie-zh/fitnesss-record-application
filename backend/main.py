@@ -6,12 +6,8 @@ from decimal import Decimal
 import asyncpg
 import datetime
 import os
-import httpx
 from typing import Optional
-
-MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY")
-MINIMAX_EMBED_URL = "https://api.minimax.chat/v1/embeddings"
-MINIMAX_CHAT_URL = "https://api.minimax.chat/v1/text/chatcompletion_v2"
+import chat as chat_router  # noqa: E402
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -22,6 +18,8 @@ pool: asyncpg.Pool = None
 async def lifespan(app: FastAPI):
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL)
+    chat_router.pool = pool
+    await chat_router.ensure_tables()
     yield
     await pool.close()
 
@@ -34,6 +32,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(chat_router.router)
 
 
 # asyncpg 返回 Decimal 和 date 对象，不能直接 JSON 序列化
@@ -175,78 +175,7 @@ async def update_workout(workout_id: int, w: WorkoutIn):
     return to_json(row)
 
 
-class ChatRequest(BaseModel):
-    message: str
-    # 前端传入最近训练记录的文本摘要，直接拼进 prompt，无需再查库
-    recent_workouts_text: str = ""
-
-
-async def embed_query(text: str) -> list[float]:
-    """把用户问题向量化，type=query 与存储端的 type=db 对应才能正确计算余弦相似度"""
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            MINIMAX_EMBED_URL,
-            headers={"Authorization": f"Bearer {MINIMAX_API_KEY}"},
-            json={"model": "embo-01", "texts": [text], "type": "query"},
-        )
-        resp.raise_for_status()
-        return resp.json()["vectors"][0]
-
-
-async def search_knowledge(embedding: list[float], limit: int = 4) -> list[str]:
-    """用余弦距离（<=>）从向量库里找最相关的知识块"""
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT content
-            FROM fitness_knowledge
-            ORDER BY embedding <=> $1::vector
-            LIMIT $2
-            """,
-            str(embedding),
-            limit,
-        )
-    return [r["content"] for r in rows]
-
-
-@app.post("/api/chat")
-async def chat(req: ChatRequest):
-    # 1. 把问题向量化后检索相关知识片段
-    query_vec = await embed_query(req.message)
-    knowledge_chunks = await search_knowledge(query_vec)
-
-    # 2. 把检索到的知识块拼成参考资料段落
-    knowledge_text = "\n\n---\n\n".join(knowledge_chunks) if knowledge_chunks else "（暂无相关知识）"
-
-    system_prompt = f"""你是一名专业健身教练助手。请根据以下参考资料和用户的训练记录，给出个性化的健身建议。
-
-【参考资料】
-{knowledge_text}
-
-【用户最近训练记录】
-{req.recent_workouts_text or "（未提供）"}
-
-回答要具体、实用，结合用户实际训练数据给出建议。"""
-
-    # 3. 调 MiniMax chat 生成回答
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            MINIMAX_CHAT_URL,
-            headers={"Authorization": f"Bearer {MINIMAX_API_KEY}"},
-            json={
-                "model": "abab6.5s-chat",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": req.message},
-                ],
-            },
-        )
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"]
-
-    return {"reply": reply}
-
-
+# ── 插入健身记录 ────────────────────────────────────────────
 @app.post("/api/workouts", status_code=201)
 async def create_workout(w: WorkoutIn):
     async with pool.acquire() as conn:
@@ -261,13 +190,3 @@ async def create_workout(w: WorkoutIn):
             w.weight_kg, w.sets, w.reps, w.duration_minutes, w.notes,
         )
     return to_json(row)
-
-@app.get("/api/debug/pool")
-async def debug_pool():
-    return {
-        "total_connections": pool.get_size(),
-        "idle_connections": pool.get_idle_size(),
-        "busy_connections": pool.get_size() - pool.get_idle_size(),
-        "min_size": pool.get_min_size(),
-        "max_size": pool.get_max_size(),
-    }
