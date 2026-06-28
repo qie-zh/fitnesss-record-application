@@ -14,6 +14,8 @@
         <div v-for="ex in day.exercises" :key="ex.id" class="exercise-row">
           <span class="ex-name">{{ ex.exercise_name }}</span>
           <span class="ex-detail">{{ formatExercise(ex) }}</span>
+          <button class="btn-edit" @click="emit('edit', ex)">编辑</button>
+          <button class="btn-del" @click="onDelete(ex)">删除</button>
         </div>
       </div>
     </div>
@@ -22,8 +24,10 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getRecentWorkouts } from '../api.js'
+import { getRecentWorkouts, deleteWorkout } from '../api.js'
 import { MUSCLE_LABEL } from '../constants.js'
+
+const emit = defineEmits(['edit', 'deleted'])
 
 const days = ref([])
 const loading = ref(true)
@@ -37,6 +41,12 @@ onMounted(async () => {
 function formatDate(iso) {
   const d = new Date(iso)
   return `${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+async function onDelete(ex) {
+  if (!confirm(`确认删除「${ex.exercise_name}」？`)) return
+  await deleteWorkout(ex.id)
+  emit('deleted')
 }
 
 function formatExercise(ex) {
@@ -76,4 +86,20 @@ function formatExercise(ex) {
 .ex-name { font-size: 14px; color: #333; }
 
 .ex-detail { font-size: 13px; color: #888; }
+
+.btn-edit {
+  padding: 2px 10px; border-radius: 8px;
+  border: 1px solid #e0e0e0; background: #fff;
+  font-size: 12px; color: #666; cursor: pointer;
+  flex-shrink: 0;
+}
+.btn-edit:hover { border-color: #ff6b35; color: #ff6b35; }
+
+.btn-del {
+  padding: 2px 10px; border-radius: 8px;
+  border: 1px solid #e0e0e0; background: #fff;
+  font-size: 12px; color: #999; cursor: pointer;
+  flex-shrink: 0;
+}
+.btn-del:hover { border-color: #e53935; color: #e53935; }
 </style>

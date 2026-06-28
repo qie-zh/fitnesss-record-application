@@ -2,49 +2,76 @@
 
 ---
 
-## 一、现有表结构分析
+## 一、系统架构
 
-### 当前 `workout_log` 表 — 无需新增表
+```
+用户浏览器 (Vue 3)
+    │  HTTP /api/*
+    ▼
+fitness-frontend  [Nginx · 宿主机 3002 端口]
+    │  反向代理 /api → fitness-backend:8000
+    ▼
+fitness-backend   [FastAPI · Python 3.11]
+    │
+    ├─ 训练记录 CRUD ──────────→ postgres-rag:5432
+    │                              └─ fitness.workout_log
+    │
+    └─ /api/chat (RAG) ────────→ postgres-rag:5432
+                                   └─ fitness.fitness_knowledge (pgvector)
+                         └──────→ MiniMax API
+                                   ├─ embo-01      (向量化)
+                                   └─ abab6.5s-chat (生成)
+```
+
+**网络**：所有容器在 `app_default` 网络内互通，仅前端暴露 3002 端口到宿主机。
+
+**知识库入库**（一次性，手动执行）：
+
+```
+/mnt/nas/Knowledge/fitness/*.pdf
+    │ pdfplumber 提取文本
+    ▼
+按 500 字分块（80 字重叠）
+    │ MiniMax embo-01 (type=db)
+    ▼
+fitness.fitness_knowledge (pgvector)
+```
+
+执行方式：`docker exec fitness-backend python ingest.py`
+
+---
+
+## 二、数据库
+
+### 2.1 `workout_log` — 训练记录
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | id | integer | 主键 |
 | date | date | 训练日期 |
 | exercise_name | varchar(100) | 动作名，自由文本 + 词联想 |
-| weight_kg | numeric(6,2) | 负数表示辅助重量，合理 |
+| weight_kg | numeric(6,2) | 负数表示辅助重量 |
 | reps | integer | 次数 |
 | sets | integer | 组数 |
-| duration_minutes | integer | 有氧时长 |
+| duration_minutes | integer | 有氧时长（与 weight/sets/reps 互斥） |
 | notes | text | 备注 |
-| muscle_group | varchar(50) | 部位，自由文本 + 词联想 |
+| muscle_group | varchar(50) | 部位，见下表 |
 
-### 不需要 exercises 参考表
+### 2.2 `fitness_knowledge` — RAG 知识库
 
-用户录入时 `exercise_name` 保持自由文本，后端通过以下 SQL 实时返回联想词及其所属部位：
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | serial | 主键 |
+| source | text | 来源文件名（如 `15503946.pdf`） |
+| chunk_index | int | 在文档中的块序号 |
+| content | text | 知识块原文 |
+| embedding | vector(1536) | MiniMax embo-01 向量，1536 维 |
 
-```sql
-SELECT DISTINCT ON (exercise_name) exercise_name, muscle_group
-FROM workout_log
-WHERE exercise_name ILIKE '%<用户输入>%'
-ORDER BY exercise_name, date DESC
-LIMIT 10;
-```
+索引：`USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50)`
 
-选中已有动作后，`muscle_group` 自动填入（取该动作最近一次记录的部位），用户无需手动选择部位。全新动作才需要手动输入部位，录入后自动进入联想池。
+### 2.3 部位枚举
 
-### 历史数据修复建议（可选）
-
-部分 2026-04-16 的记录 `muscle_group` 为空，可手动补全：
-```sql
-UPDATE workout_log SET muscle_group = 'chest' WHERE date = '2026-04-16' AND exercise_name IN ('史密斯上斜', '史密斯卧推', '器械夹胸');
-UPDATE workout_log SET muscle_group = 'arms'  WHERE date = '2026-04-16' AND exercise_name IN ('臂屈伸', '二头弯举');
-```
-
----
-
-## 二、部位分类
-
-| muscle_group 值 | 显示名 |
+| muscle_group | 显示名 |
 |---|---|
 | chest | 胸 |
 | back | 背 |
@@ -55,197 +82,131 @@ UPDATE workout_log SET muscle_group = 'arms'  WHERE date = '2026-04-16' AND exer
 | core | 核心 |
 | cardio | 有氧 |
 
-> 手臂细分为 `biceps`（二头）和 `triceps`（三头），录入时词联想也会给出部位建议。
+> 动作名词联想通过 `DISTINCT ON (exercise_name) ORDER BY date DESC` 取最近一次记录的 muscle_group，新动作才需要手动选择部位。
 
 ---
 
-## 三、功能模块图
+## 三、功能模块
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                      健身记录应用                         │
-├─────────────────┬──────────────────┬─────────────────────┤
-│   Dashboard     │    录入模块      │   按部位 + 趋势      │
-│                 │                  │                      │
-│ · 最近5个训练日 │ · 动作名词联想   │ · 选择部位           │
-│   按日期分组    │ · 已有动作自动   │ · 该部位最近10条     │
-│   展示所有记录  │   填入部位       │   训练记录           │
-│                 │ · 新动作手动     │ · 点击某条记录       │
-│                 │   输入部位       │   → 该动作折线图     │
-│                 │ · 重量/组数/次数 │   (重量/组数/次数)   │
-│                 │ · 有氧填时长     │                      │
-└─────────────────┴──────────────────┴─────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                        健身记录应用                           │
+├──────────────────┬───────────────────┬───────────────────────┤
+│   最近记录       │    按部位         │    AI 建议            │
+│                  │                   │                       │
+│ · 最近5训练日    │ · 部位标签切换    │ · 自然语言对话        │
+│   按日期分组     │ · 该部位所有动作  │ · 自动附带最近训练    │
+│ · 每条可编辑     │   最新一次数据    │   记录作为上下文      │
+│ · 每条可删除     │ · 点击展开折线图  │ · RAG 检索知识库      │
+│ · 右上角新建     │   (手风琴效果)    │   生成个性化建议      │
+└──────────────────┴───────────────────┴───────────────────────┘
+         │                  │                      │
+    + 录入 Modal       TrendChart            /api/chat
+    (新建/编辑复用)    (ECharts 折线)       (MiniMax)
 ```
 
 ---
 
 ## 四、页面与流程
 
-### 4.1 Dashboard（首页）
+### 4.1 最近记录（Dashboard）
 
 ```
-┌─────────────────────────────────┐
-│  最近训练记录       [+ 录入]    │
-├─────────────────────────────────┤
-│  2026-04-19  [肩]               │
-│    绳索侧拉   3.75kg × 5组 × 10次│
-│    哑铃推肩   9kg   × 5组 × 15次│
-├─────────────────────────────────┤
-│  2026-04-18  [背][核心][有氧]   │
-│    高位下拉   47kg  × 2组 × 10次│
-│    ...                          │
-└─────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│  最近记录  按部位  AI建议    [+ 录入]   │
+├─────────────────────────────────────────┤
+│  6月14日  [肩]                          │
+│    绳索侧拉  3.75kg × 5组 × 10次  编辑 删除│
+│    哑铃推肩  9kg   × 5组 × 15次   编辑 删除│
+├─────────────────────────────────────────┤
+│  6月13日  [背][核心]                    │
+│    高位下拉  47kg × 2组 × 10次    编辑 删除│
+└─────────────────────────────────────────┘
 ```
 
-直接展示最近 5 个**有训练记录的日期**（不是自然日），无需跳转。
+### 4.2 录入 / 编辑流程（同一个 Modal）
+
+```
+点击 [+ 录入] → editingWorkout = null → 新建模式
+点击 [编辑]   → editingWorkout = 该条记录 → 编辑模式
+    │
+    ▼
+WorkoutModal 根据是否有 workout.id 决定调用 POST 还是 PUT
+    │
+    ├─ 填写日期（默认今天）
+    ├─ 输入动作名 → 实时词联想
+    │   ├─ 选中已有动作 → muscle_group 自动填入（只读标签）
+    │   └─ 全新动作 → 显示部位下拉框
+    ├─ 有氧 → 只填时长
+    └─ 力量 → 填重量 / 组数 / 次数
+    │
+    ▼
+保存 → 列表刷新
+```
+
+### 4.3 按部位 + 折线图
+
+```
+选择部位标签
+    │
+    ▼
+展示该部位所有动作（最新一次数据 + 累计训练次数）
+    │
+    ▼
+点击某动作行 → 展开折线图（再次点击折叠）
+    ├─ 力量：最大重量(kg) / 总组数 / 最大次数  [双 Y 轴]
+    └─ 有氧：总时长(分钟)                      [单 Y 轴]
+```
+
+### 4.4 AI 建议（RAG 对话）
+
+```
+进入页面 → 拉取最近训练记录并格式化为文本（缓存）
+    │
+用户发送问题
+    │
+    ▼
+POST /api/chat { message, recent_workouts_text }
+    │
+    ├─ 1. 问题 → embo-01 (type=query) → 查询向量
+    ├─ 2. pgvector <=> 余弦检索 Top 4 知识块
+    ├─ 3. 拼 Prompt：系统角色 + 知识块 + 训练记录 + 问题
+    └─ 4. abab6.5s-chat 生成回答
+    │
+    ▼
+气泡样式展示对话，Enter 发送，支持多轮
+```
 
 ---
 
-### 4.2 录入流程
-
-```
-点击 [+ 录入]
-    │
-    ▼
-填写训练日期（默认今天）
-    │
-    ▼
-输入动作名 → 实时词联想（来自历史记录）
-    │
-    ├─ 选中已有动作 → 部位自动填入（取该动作最近记录的部位）
-    └─ 输入全新动作 → 手动输入部位
-    │
-    ▼
-    ├─ 有氧动作 → 只填时长
-    └─ 力量动作 → 填重量 / 组数 / 次数
-    │
-    ▼
-提交 → 成功 → Dashboard 刷新
-```
-
----
-
-### 4.3 按部位查看 + 折线图（合并流程）
-
-```
-进入「按部位」页
-    │
-    ▼
-顶部选择部位标签（胸 / 背 / 肩 / 二头 / 三头 / 腿 / 核心 / 有氧）
-    │
-    ▼
-展示该部位最近 10 条训练记录
-（每条显示：日期 · 动作名 · 重量×组×次）
-    │
-    ▼
-点击某条记录中的动作名
-    │
-    ▼
-底部展开（或弹出）该动作的折线图（X轴=日期）
-    ├─ 最大重量 kg
-    ├─ 总组数
-    └─ 单组最大次数
-```
-
----
-
-## 五、API 接口设计
+## 五、API 接口
 
 ### Base URL: `/api`
 
----
-
-### 5.1 词联想
-
-#### `GET /api/suggest/exercise?q=高位`
-动作名联想，同时返回该动作对应的部位（用于自动填入）
-
-**Response**
-```json
-[
-  { "exercise_name": "高位下拉", "muscle_group": "back" },
-  { "exercise_name": "高位绳索飞鸟", "muscle_group": "chest" }
-]
-```
-
-> 取消独立的部位联想接口，部位通过动作联想一并返回，全新动作时前端直接显示部位输入框。
-
----
-
-### 5.2 训练记录
-
-#### `GET /api/workouts/recent`
-最近 5 个训练日的记录（Dashboard 用）
-
-**Response**
-```json
-[
-  {
-    "date": "2026-04-19",
-    "muscle_groups": ["shoulders"],
-    "exercises": [
-      { "id": 44, "exercise_name": "绳索侧拉", "weight_kg": 3.75, "sets": 5, "reps": 10, "duration_minutes": null },
-      { "id": 45, "exercise_name": "哑铃推肩", "weight_kg": 9.00, "sets": 5, "reps": 15, "duration_minutes": null }
-    ]
-  }
-]
-```
-
----
-
-#### `GET /api/workouts/by-muscle?group=back`
-按部位查看最近 10 条训练记录（扁平列表，不按日期分组）
-
-**Query Params**
-| 参数 | 必填 | 说明 |
+| 方法 | 路径 | 说明 |
 |---|---|---|
-| group | ✅ | 如 `back` / `biceps` / `triceps` |
+| GET | `/suggest/exercise?q=` | 动作名词联想（含 muscle_group） |
+| GET | `/workouts/recent` | 最近 5 训练日记录 |
+| GET | `/workouts/by-muscle?group=` | 按部位查所有动作最新数据 |
+| GET | `/workouts/trend?exercise=` | 某动作历史趋势（折线图） |
+| POST | `/workouts` | 新建训练记录 |
+| PUT | `/workouts/{id}` | 编辑训练记录 |
+| DELETE | `/workouts/{id}` | 删除训练记录 |
+| POST | `/chat` | AI 建议（RAG + MiniMax） |
 
-**Response**
-```json
-[
-  { "id": 37, "date": "2026-04-18", "exercise_name": "高位下拉", "weight_kg": 47, "sets": 2, "reps": 10, "duration_minutes": null },
-  { "id": 38, "date": "2026-04-18", "exercise_name": "高位下拉", "weight_kg": 40, "sets": 2, "reps": 10, "duration_minutes": null }
-]
-```
+### POST `/chat` 详情
 
----
-
-#### `GET /api/workouts/trend?exercise=高位下拉`
-某动作历史趋势（折线图数据，点击记录后调用）
-
-**Response**
-```json
-[
-  { "date": "2026-04-18", "max_weight_kg": 47.0, "total_sets": 4, "max_reps": 10 },
-  { "date": "2026-03-10", "max_weight_kg": 43.0, "total_sets": 3, "max_reps": 10 }
-]
-```
-
----
-
-#### `POST /api/workouts`
-录入一条训练记录
-
-**Request Body**
+**Request**
 ```json
 {
-  "date": "2026-06-11",
-  "exercise_name": "高位下拉",
-  "muscle_group": "back",
-  "weight_kg": 50,
-  "sets": 3,
-  "reps": 10,
-  "duration_minutes": null,
-  "notes": ""
+  "message": "帮我安排下周训练计划",
+  "recent_workouts_text": "2026-06-14（肩）\n  - 绳索侧拉：3.75kg × 5组 × 10次\n..."
 }
 ```
 
-> `muscle_group` 在前端由词联想自动填入，后端仍作为必填字段存储，保证数据完整。
-
-**Response** `201`
+**Response**
 ```json
-{ "id": 46, "date": "2026-06-11", "exercise_name": "高位下拉", ... }
+{ "reply": "根据你最近的训练情况..." }
 ```
 
 ---
@@ -254,12 +215,46 @@ UPDATE workout_log SET muscle_group = 'arms'  WHERE date = '2026-04-16' AND exer
 
 | 层 | 选择 | 说明 |
 |---|---|---|
-| 前端 | Vue 3 + Vite | 轻量，适合小应用 |
-| 图表 | ECharts | 折线图支持好 |
-| 后端 | FastAPI (Python) | 接 PostgreSQL 方便 |
-| 数据库 | 现有 PostgreSQL `fitness` 库 | 无需改表结构 |
-| 部署 | docker-compose 新增服务 | 加到现有 compose 文件 |
+| 前端框架 | Vue 3 + Vite | 轻量，组合式 API |
+| 图表 | ECharts + vue-echarts | 折线图，双 Y 轴 |
+| HTTP 客户端 | Axios | 统一封装在 api.js |
+| 后端 | FastAPI (Python 3.11) | 异步，类型注解 |
+| 数据库驱动 | asyncpg | 异步 PostgreSQL |
+| HTTP 客户端（后端） | httpx | 异步调用 MiniMax API |
+| PDF 解析 | pdfplumber | 中文 PDF 提取 |
+| 数据库 | PostgreSQL 16 + pgvector | 现有容器 `postgres-rag` |
+| AI API | MiniMax | embo-01 embedding + abab6.5s-chat |
+| 部署 | docker-compose | app_default 网络 |
+| 静态服务 | Nginx | 前端 + /api 反向代理 |
 
 ---
 
-> 确认设计后开始实现
+## 七、文件结构
+
+```
+fitness/
+├── .env                    # MINIMAX_API_KEY（不提交 git）
+├── .gitignore
+├── docker-compose.yml
+├── backend/
+│   ├── Dockerfile
+│   ├── requirements.txt    # fastapi uvicorn asyncpg httpx pdfplumber
+│   ├── main.py             # FastAPI 路由
+│   └── ingest.py           # 知识库入库脚本（手动执行一次）
+└── frontend/
+    ├── Dockerfile
+    ├── nginx.conf
+    ├── vite.config.js
+    └── src/
+        ├── api.js           # Axios 封装
+        ├── constants.js     # 部位枚举
+        ├── App.vue          # 顶部导航 + Tab 切换
+        ├── views/
+        │   ├── DashboardView.vue  # 最近记录
+        │   ├── MuscleView.vue     # 按部位
+        │   └── AiView.vue         # AI 建议
+        └── components/
+            ├── WorkoutModal.vue   # 新建/编辑 Modal
+            ├── AutoComplete.vue   # 动作名词联想下拉
+            └── TrendChart.vue     # ECharts 折线图
+```

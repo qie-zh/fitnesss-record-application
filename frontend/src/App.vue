@@ -4,16 +4,18 @@
       <nav class="tabs">
         <button :class="['tab', { active: page === 'dashboard' }]" @click="page = 'dashboard'">最近记录</button>
         <button :class="['tab', { active: page === 'muscle' }]" @click="page = 'muscle'">按部位</button>
+        <button :class="['tab', { active: page === 'ai' }]" @click="page = 'ai'">AI 建议</button>
       </nav>
-      <button class="btn-add" @click="showModal = true">+ 录入</button>
+      <button class="btn-add" @click="editingWorkout = null; showModal = true">+ 录入</button>
     </header>
 
     <main class="main">
-      <DashboardView v-if="page === 'dashboard'" :key="refreshKey" />
-      <MuscleView v-else :key="refreshKey" />
+      <DashboardView v-if="page === 'dashboard'" :key="refreshKey" @edit="onEdit" @deleted="refreshKey++" />
+      <MuscleView v-else-if="page === 'muscle'" :key="refreshKey" />
+      <AiView v-else-if="page === 'ai'" />
     </main>
 
-    <WorkoutModal v-if="showModal" @close="showModal = false" @saved="onSaved" />
+    <WorkoutModal v-if="showModal" :workout="editingWorkout" @close="showModal = false" @saved="onSaved" />
   </div>
 </template>
 
@@ -21,14 +23,22 @@
 import { ref } from 'vue'
 import DashboardView from './views/DashboardView.vue'
 import MuscleView from './views/MuscleView.vue'
+import AiView from './views/AiView.vue'
 import WorkoutModal from './components/WorkoutModal.vue'
 
 const page = ref('dashboard')
 const showModal = ref(false)
 const refreshKey = ref(0)
+const editingWorkout = ref(null)
+
+function onEdit(workout) {
+  editingWorkout.value = workout
+  showModal.value = true
+}
 
 function onSaved() {
   showModal.value = false
+  editingWorkout.value = null
   refreshKey.value++
 }
 </script>

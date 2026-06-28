@@ -28,7 +28,9 @@ onMounted(async () => {
   loading.value = false
 })
 
-const isCardio = computed(() => data.value.every(d => d.max_weight_kg == null))
+const noWeight   = computed(() => data.value.every(d => d.max_weight_kg == null))
+const isCardio   = computed(() => noWeight.value && data.value.some(d => d.total_duration != null))
+const isBodyweight = computed(() => noWeight.value && !isCardio.value)
 
 const dates = computed(() => data.value.map(d => d.date))
 
@@ -39,6 +41,20 @@ const series = computed(() => {
       data: data.value.map(d => d.total_duration),
       itemStyle: { color: '#ff6b35' },
     }]
+  }
+  if (isBodyweight.value) {
+    return [
+      {
+        name: '总组数', type: 'line', smooth: true,
+        data: data.value.map(d => d.total_sets),
+        itemStyle: { color: '#4a90e2' },
+      },
+      {
+        name: '最大次数', type: 'line', smooth: true,
+        data: data.value.map(d => d.max_reps),
+        itemStyle: { color: '#7ed321' },
+      },
+    ]
   }
   return [
     {
@@ -66,12 +82,12 @@ const option = computed(() => ({
   legend: { bottom: 0, textStyle: { fontSize: 12 } },
   grid: { top: 12, left: 40, right: 40, bottom: 40 },
   xAxis: { type: 'category', data: dates.value, axisLabel: { fontSize: 11 } },
-  yAxis: isCardio.value
-    ? [{ type: 'value', axisLabel: { fontSize: 11 } }]
-    : [
+  yAxis: (!isBodyweight.value && !isCardio.value)
+    ? [
         { type: 'value', name: 'kg', nameTextStyle: { fontSize: 11 }, axisLabel: { fontSize: 11 } },
         { type: 'value', name: '次/组', nameTextStyle: { fontSize: 11 }, axisLabel: { fontSize: 11 } },
-      ],
+      ]
+    : [{ type: 'value', axisLabel: { fontSize: 11 } }],
   series: series.value,
 }))
 </script>

@@ -5,6 +5,9 @@ services:
     restart: always
     environment:
       DATABASE_URL: postgresql://zhang:zh1998@postgres-rag:5432/fitness
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY}
+    volumes:
+      - /mnt/nas/Knowledge/fitness:/knowledge:ro
     networks:
       - app_net
 

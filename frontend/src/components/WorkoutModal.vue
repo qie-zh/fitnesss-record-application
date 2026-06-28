@@ -2,7 +2,7 @@
   <div class="overlay" @click.self="$emit('close')">
     <div class="modal">
       <div class="modal-header">
-        <h2>录入训练</h2>
+        <h2>{{ workout ? '编辑训练' : '录入训练' }}</h2>
         <button class="close-btn" @click="$emit('close')">✕</button>
       </div>
 
@@ -65,13 +65,14 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import AutoComplete from './AutoComplete.vue'
-import { suggestExercise, createWorkout } from '../api.js'
+import { suggestExercise, createWorkout, updateWorkout } from '../api.js'
 import { MUSCLE_LABEL, MUSCLE_GROUPS } from '../constants.js'
 
+const props = defineProps({ workout: { type: Object, default: null } })
 const emit = defineEmits(['close', 'saved'])
 
 const today = new Date().toISOString().slice(0, 10)
-const form = reactive({
+const form = reactive(props.workout ? { ...props.workout } : {
   date: today,
   exercise_name: '',
   muscle_group: '',
@@ -83,6 +84,7 @@ const form = reactive({
 })
 
 const suggestions = ref([])
+// 从联想词选中后置 true，将部位显示为只读标签，防止误触下拉框
 const autoFilledMuscle = ref(false)
 const saving = ref(false)
 
@@ -113,7 +115,11 @@ function onSelectExercise(item) {
 async function submit() {
   saving.value = true
   try {
-    await createWorkout({ ...form })
+    if (props.workout?.id) {
+      await updateWorkout(props.workout.id, { ...form })
+    } else {
+      await createWorkout({ ...form })
+    }
     emit('saved')
   } finally {
     saving.value = false

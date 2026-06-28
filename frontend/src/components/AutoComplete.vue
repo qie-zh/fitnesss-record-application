@@ -44,6 +44,7 @@ function onInput(e) {
 }
 
 function onBlur() {
+  // blur 先于 mousedown 触发；延迟关闭让下拉项的 confirm() 能先执行
   setTimeout(() => { open.value = false }, 150)
 }
 

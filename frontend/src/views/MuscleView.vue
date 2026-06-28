@@ -58,6 +58,7 @@ async function select(g) {
   loading.value = false
 }
 
+// 再次点击同一行则折叠图表（手风琴效果）
 function toggleChart(name) {
   activeExercise.value = activeExercise.value === name ? null : name
 }
@@ -76,7 +77,7 @@ function formatExercise(ex) {
   return parts.join(' × ')
 }
 
-onMounted(() => select('back'))
+onMounted(() => select('back')) // 预加载"背"，避免首屏空列表
 </script>
 
 <style scoped>
